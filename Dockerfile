@@ -1,85 +1,25 @@
-FROM node:lts-slim AS frontend-builder
-WORKDIR /build/frontend
-RUN npm install -g pnpm
-COPY frontend/ .
-RUN pnpm install && pnpm run build
+# 阶段 1：使用轻量的 Ubuntu 作为基础
+FROM ubuntu:latest
 
-FROM docker.io/lukemathwalker/cargo-chef:latest-rust-trixie AS chef
-WORKDIR /build
+# 安装下载工具和解压工具
+RUN apt-get update && apt-get install -y wget unzip ca-certificates && rm -rf /var/lib/apt/lists/*
 
-FROM chef AS planner
-COPY . .
-RUN cargo chef prepare --recipe-path recipe.json
+# 创建配置文件目录
+WORKDIR /etc/clewdr
 
-FROM chef AS backend-builder
-ARG TARGETPLATFORM
-# Install musl target and required dependencies
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    musl-tools \
-    musl-dev \
-    cmake \
-    clang \
-    libclang-dev \
-    perl \
-    pkg-config \
-    upx-ucl \
-    && rm -rf /var/lib/apt/lists/*
-RUN rustup target add x86_64-unknown-linux-musl && \
-    rustup target add aarch64-unknown-linux-musl
-COPY --from=planner /build/recipe.json recipe.json
+# 【核心步骤】直接从 GitHub 下载作者编译好的最新版二进制文件
+# 这里我写的是 v0.12.14，以后有新版你只需要回来改这个版本号
+RUN wget https://github.com/xerxes-2/clewdr/releases/download/v0.12.14/clewdr-linux-x86_64.zip && \
+    unzip clewdr-linux-x86_64.zip && \
+    chmod +x clewdr && \
+    mv clewdr /usr/local/bin/clewdr
 
-# Build dependencies - this is the caching Docker layer!
-RUN <<EOF
-set -e
-case ${TARGETPLATFORM} in \
-    "linux/amd64") \
-        RUST_TARGET="x86_64-unknown-linux-musl"
-        export CXX="x86_64-linux-gnu-g++"
-        ;; \
-    "linux/arm64") \
-        RUST_TARGET="aarch64-unknown-linux-musl"
-        export CXX="aarch64-linux-gnu-g++"
-        ;; \
-    *) echo "Unsupported architecture: ${TARGETPLATFORM}" >&2; exit 1 ;; \
-esac
-mkdir -p ~/.cargo
-cargo chef cook --release --target ${RUST_TARGET} --no-default-features --features embed-resource,xdg --recipe-path recipe.json
-EOF
-
-# Build application
-COPY . .
-ENV RUSTFLAGS="-Awarnings"
-COPY --from=frontend-builder /build/static/ ./static
-RUN <<EOF
-set -e
-case ${TARGETPLATFORM} in \
-    "linux/amd64") \
-        RUST_TARGET="x86_64-unknown-linux-musl"
-        export CXX="x86_64-linux-gnu-g++"
-        ;; \
-    "linux/arm64") \
-        RUST_TARGET="aarch64-unknown-linux-musl"
-        export CXX="aarch64-linux-gnu-g++"
-        ;; \
-    *) echo "Unsupported architecture: ${TARGETPLATFORM}" >&2; exit 1 ;; \
-esac
-cargo build --release --target ${RUST_TARGET}  --no-default-features --features embed-resource,xdg --bin clewdr
-upx --best --lzma ./target/${RUST_TARGET}/release/clewdr
-cp ./target/${RUST_TARGET}/release/clewdr /build/clewdr
-mkdir -p /etc/clewdr && cd /etc/clewdr
-touch clewdr.toml && mkdir -p log
-EOF
-
-FROM gcr.io/distroless/static
-COPY --from=backend-builder /build/clewdr /usr/local/bin/clewdr
-COPY --from=backend-builder /etc/clewdr /etc/
+# 设置环境变量默认值
 ENV CLEWDR_IP=0.0.0.0
 ENV CLEWDR_PORT=8484
-ENV CLEWDR_CHECK_UPDATE=FALSE
-ENV CLEWDR_AUTO_UPDATE=FALSE
 
+# 暴露 Wiki 指定的 8484 端口
 EXPOSE 8484
 
-VOLUME [ "/etc/clewdr" ]
-CMD ["/usr/local/bin/clewdr", "--config", "/etc/clewdr/clewdr.toml", "--log-dir", "/etc/clewdr/log"]
+# 启动命令（告诉程序去哪里找日志和配置）
+CMD ["/usr/local/bin/clewdr", "--log-dir", "/etc/clewdr/log"]
